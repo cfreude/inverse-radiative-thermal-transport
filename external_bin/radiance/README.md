@@ -1,0 +1,1 @@
+Download [Radiance](https://www.radiance-online.org) and copy the `bin` and `lib` folders into this directory.

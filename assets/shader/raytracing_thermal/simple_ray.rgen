@@ -1,0 +1,499 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_nonuniform_qualifier : require
+#extension GL_EXT_ray_tracing : require
+
+#include "defines.h"
+#include "../utils/glsl/ray_tracing_utils.glsl"
+#include "../utils/glsl/rendering_utils.glsl"
+
+const vec4 backgroundColor = vec4(0.15, 0.15, 0.15, 1);
+//const vec4 backgroundColor = vec4(1.0, 1.0, 1.0, 1.0); //ToDo: sync to var::bg from CPU side
+
+const float vis_dot_size = 0.03; // size of marker around selected vertex when visualizing transport buffer data
+
+// set 0
+#define CONV_TEXTURE_BINDING GLSL_GLOBAL_IMAGE_BINDING
+#define CONV_TEXTURE_SET GLSL_GLOBAL_IMAGE_DESC_SET
+#include "../convenience/glsl/texture_data.glsl"
+
+// set 1
+layout(binding = GLSL_GLOBAL_UBO_BINDING, set = GLSL_GLOBAL_DESC_SET) uniform global_ubo { GlobalUbo ubo; };
+layout(binding = GLSL_GLOBAL_AUX_UBO_BINDING, set = GLSL_GLOBAL_DESC_SET) uniform global_aux_ubo { AuxiliaryUbo aux_ubo; };
+layout(binding = GLSL_GLOBAL_INSTANCE_DATA_BINDING, set = GLSL_GLOBAL_DESC_SET) buffer instance_ssbo { InstanceSSBO instance_buffer[]; };
+layout(binding = GLSL_GLOBAL_GEOMETRY_DATA_BINDING, set = GLSL_GLOBAL_DESC_SET) buffer geometry_ssbo { GeometrySSBO geometry_buffer[]; };
+struct vertex_s {
+	vec4	position;
+	vec4	normal;	
+	vec4	tangent;
+
+	vec2	texture_coordinates_0;
+	vec2	texture_coordinates_1;
+	vec4	color_0;
+};
+layout(binding = GLSL_GLOBAL_INDEX_BUFFER_BINDING, set = GLSL_GLOBAL_DESC_SET) buffer index_storage_buffer { uint index_buffer[]; };
+layout(binding = GLSL_GLOBAL_VERTEX_BUFFER_BINDING, set = GLSL_GLOBAL_DESC_SET) buffer vertex_storage_buffer { vertex_s vertex_buffer[]; };
+
+layout(binding = GLSL_GLOBAL_TRANSPORT_DATA_BINDING, set = GLSL_GLOBAL_DESC_SET) buffer transport_data_buffer { SCALAR transport_buffer[]; };
+layout(binding = GLSL_GLOBAL_KELVIN_DATA_BINDING, set = GLSL_GLOBAL_DESC_SET) buffer kelvin_data_buffer { SCALAR kelvin_buffer[]; };
+
+layout(binding = GLSL_GLOBAL_AS_BINDING, set = GLSL_GLOBAL_DESC_SET) uniform accelerationStructureEXT topLevelAS;
+layout(binding = GLSL_GLOBAL_OUT_IMAGE_BINDING, set = GLSL_GLOBAL_DESC_SET, rg32f) uniform image2D output_image;
+
+#include "payload.glsl"
+layout(location = 0) rayPayloadEXT RayPayload rp;
+
+struct Ray {
+	vec3 origin, direction;
+	float t_min, t_max;
+};
+
+// screen coordinates in clip space
+vec2 getScreenCoordinates(){
+	// pixel center offset
+	vec2 pixelOffset = vec2(0.5);
+	const vec2 pixelCenter = vec2(gl_LaunchIDEXT.xy) + pixelOffset;
+	const vec2 inUV = pixelCenter/vec2(gl_LaunchSizeEXT.xy);
+	const vec2 screenCoordClipSpace  = inUV * 2.0 - 1.0;
+	return screenCoordClipSpace;
+}
+
+Ray getRay(vec2 sccs)
+{
+	const vec4 origin = ubo.inverseViewMat * vec4(0,0,0,1);
+	const vec4 target = ubo.inverseProjMat * vec4(sccs.x, sccs.y, 1, 1) ;
+	const vec4 direction = ubo.inverseViewMat * vec4(normalize(target.xyz), 0) ;
+
+	Ray ray;
+	ray.origin = origin.xyz;
+	ray.direction = direction.xyz;
+	ray.t_min = 0.001;
+	ray.t_max = 10000.0f;
+	return ray;
+}
+
+Ray getContinuingRay(vec3 _barycentricCoords, uvec4 _vertex_indices, vec3 _dir, vec3 _normal)
+{
+	vertex_s v0 = vertex_buffer[_vertex_indices.x];	
+	vertex_s v1 = vertex_buffer[_vertex_indices.y];	
+	vertex_s v2 = vertex_buffer[_vertex_indices.z];
+	
+	InstanceSSBO instance = instance_buffer[_vertex_indices.w];
+	
+	vec4 origin = vec4(v0.position * _barycentricCoords.x + v1.position * _barycentricCoords.y + v2.position * _barycentricCoords.z);
+	origin = instance.model_matrix * origin;
+		
+	// calculate next direction ray
+	Ray ray;
+	ray.origin = offsetRayToAvoidSelfIntersection(origin.xyz, _normal);
+	ray.direction = _dir;
+	ray.t_min = 0.0;
+	ray.t_max = 10000.0f;	
+
+	return ray;
+}
+
+vec4 colormap(float x) {
+    float r = clamp(8.0 / 3.0 * x, 0.0, 1.0);
+    float g = clamp(8.0 / 3.0 * x - 1.0, 0.0, 1.0);
+    float b = clamp(4.0 * x - 3.0, 0.0, 1.0);
+    return vec4(r, g, b, 1.0);
+}
+
+vec3 color_map_inferno(float t) {
+
+    const vec3 c0 = vec3(0.0002189403691192265, 0.001651004631001012, -0.01948089843709184);
+    const vec3 c1 = vec3(0.1065134194856116, 0.5639564367884091, 3.932712388889277);
+    const vec3 c2 = vec3(11.60249308247187, -3.972853965665698, -15.9423941062914);
+    const vec3 c3 = vec3(-41.70399613139459, 17.43639888205313, 44.35414519872813);
+    const vec3 c4 = vec3(77.162935699427, -33.40235894210092, -81.80730925738993);
+    const vec3 c5 = vec3(-71.31942824499214, 32.62606426397723, 73.20951985803202);
+    const vec3 c6 = vec3(25.13112622477341, -12.24266895238567, -23.07032500287172);
+
+    return c0+t*(c1+t*(c2+t*(c3+t*(c4+t*(c5+t*c6)))));
+}
+
+float colormap_f1(int formula, float x) {
+    float DEG2RAD = 3.1415926535897932384 / 180.0;
+    if (formula < 0) {
+        x = 1.0 - x;
+        formula = -formula;
+    }
+    float d = 0.0;
+    if (formula == 0) {
+        return 0.0;
+    } else if (formula == 1) {
+        return 0.5;
+    } else if (formula == 2) {
+        return 1.0;
+    } else if (formula == 3) {
+        d = x;
+    } else if (formula == 4) {
+        d = x * x;
+    } else if (formula == 5) {
+        d = x * x * x;
+    } else if (formula == 6) {
+        d = x * x * x * x;
+    } else if (formula == 7) {
+        d = sqrt(x);
+    } else if (formula == 8) {
+        d = sqrt(sqrt(x));
+    } else if (formula == 9) {
+        d = sin(90.0 * x * DEG2RAD);
+    } else if (formula == 10) {
+        d = cos(90.0 * x * DEG2RAD);
+    } else if (formula == 11) {
+        d = abs(x - 0.5);
+    } else if (formula == 12) {
+        d = (2.0 * x - 1.0) * (2.0 * x - 1.0);
+    } else if (formula == 13) {
+        d = sin(180.0 * x * DEG2RAD);
+    } else if (formula == 14) {
+        d = abs(cos(180.0 * x * DEG2RAD));
+    } else if (formula == 15) {
+        d = sin(360.0 * x * DEG2RAD);
+    } else if (formula == 16) {
+        d = cos(360.0 * x * DEG2RAD);
+    } else if (formula == 17) {
+        d = abs(sin(360.0 * x * DEG2RAD));
+    } else if (formula == 18) {
+        d = abs(cos(360.0e0 * x * DEG2RAD));
+    } else if (formula == 19) {
+        d = abs(sin(720.0e0 * x * DEG2RAD));
+    } else if (formula == 20) {
+        d = abs(cos(720.0e0 * x * DEG2RAD));
+    } else if (formula == 21) {
+        d = 3.0e0 * x;
+    } else if (formula == 22) {
+        d = 3.0e0 * x - 1.0e0;
+    } else if (formula == 23) {
+        d = 3.0e0 * x - 2.0e0;
+    } else if (formula == 24) {
+        d = abs(3.0e0 * x - 1.0e0);
+    } else if (formula == 25) {
+        d = abs(3.0e0 * x - 2.0e0);
+    } else if (formula == 26) {
+        d = 1.5e0 * x - 0.5e0;
+    } else if (formula == 27) {
+        d = 1.5e0 * x - 1.0e0;
+    } else if (formula == 28) {
+        d = abs(1.5e0 * x - 0.5e0);
+    } else if (formula == 29) {
+        d = abs(1.5e0 * x - 1.0e0);
+    } else if (formula == 30) {
+        if (x <= 0.25e0) {
+            return 0.0;
+        } else if (x >= 0.57) {
+            return 1.0;
+        } else {
+            d = x / 0.32 - 0.78125;
+        }
+    } else if (formula == 31) {
+        if (x <= 0.42) {
+            return 0.0;
+        } else if (x >= 0.92) {
+            return d = 1.0;
+        } else {
+            d = 2.0 * x - 0.84;
+        }
+    } else if (formula == 32) {
+        if (x <= 0.42) {
+            d = x * 4.0;
+        } else {
+            if (x <= 0.92e0) {
+                d = -2.0 * x + 1.84;
+            } else {
+                d = x / 0.08 - 11.5;
+            }
+        }
+    } else if (formula == 33) {
+        d = abs(2.0 * x - 0.5);
+    } else if (formula == 34) {
+        d = 2.0 * x;
+    } else if (formula == 35) {
+        d = 2.0 * x - 0.5;
+    } else if (formula == 36) {
+        d = 2.0 * x - 1.0;
+    }
+    if (d <= 0.0) {
+        return 0.0;
+    } else if (d >= 1.0) {
+        return 1.0;
+    } else {
+        return d;
+    }
+}
+
+vec4 colormap_(float x, int red_type, int green_type, int blue_type) {
+    return vec4(colormap_f1(red_type, x), colormap_f1(green_type, x), colormap_f1(blue_type, x), 1.0);
+}
+
+vec3 color_map_plasma(float t) {
+
+    const vec3 c0 = vec3(0.05873234392399702, 0.02333670892565664, 0.5433401826748754);
+    const vec3 c1 = vec3(2.176514634195958, 0.2383834171260182, 0.7539604599784036);
+    const vec3 c2 = vec3(-2.689460476458034, -7.455851135738909, 3.110799939717086);
+    const vec3 c3 = vec3(6.130348345893603, 42.3461881477227, -28.51885465332158);
+    const vec3 c4 = vec3(-11.10743619062271, -82.66631109428045, 60.13984767418263);
+    const vec3 c5 = vec3(10.02306557647065, 71.41361770095349, -54.07218655560067);
+    const vec3 c6 = vec3(-3.658713842777788, -22.93153465461149, 18.19190778539828);
+
+    return c0+t*(c1+t*(c2+t*(c3+t*(c4+t*(c5+t*c6)))));
+
+}
+
+const vec4 colormap_flo[11] = vec4[11](
+	vec4(0.0, 0.031372999999999998, 0.015685999999999999, 0.31372499999999998),
+	vec4(0.05810000000000002, 0.11372500000000001, 0.0039220000000000001, 0.48627500000000001),
+	vec4(0.123, 0.29411799999999999, 0.0, 0.56862699999999999),
+	vec4(0.24879999999999997, 0.623529, 0.0, 0.596078),
+	vec4(0.36499999999999999, 0.78039199999999997, 0.062744999999999995, 0.47058800000000001),
+	vec4(0.49629999999999996, 0.89803900000000003, 0.270588, 0.066667000000000004),
+	vec4(0.6176999999999998, 0.94509799999999999, 0.46274500000000002, 0.0),
+	vec4(0.75370000000000004, 0.972549, 0.70196099999999995, 0.0),
+	vec4(0.875, 0.96862700000000002, 0.88235300000000005, 0.16078400000000001),
+	vec4(0.94190000000000018, 0.972549, 0.92549000000000003, 0.494118),
+	vec4(1.0, 0.97647099999999998, 0.972549, 0.85490200000000005)
+	);
+
+vec4 sample_colormap_flo(float _t)
+{
+	int index = 0;
+	for(int i=0; i<11; i++)	{
+		float ct = colormap_flo[i].r;
+		if(ct>=_t) {
+			index = i;
+			//break;
+		}
+	}
+	vec4 a = colormap_flo[index-1];	
+	vec4 b = colormap_flo[index];
+	float t = (_t - a.r) / (b.r - a.r);
+	return mix(vec4(a.gba, 1.0), vec4(b.gba, 1.0), t);
+}
+
+vec3 getNormal(uvec4 _vertex_indices, vec3 _barycentricCoords)
+{	
+	vertex_s v0 = vertex_buffer[_vertex_indices.x];	
+	vertex_s v1 = vertex_buffer[_vertex_indices.y];	
+	vertex_s v2 = vertex_buffer[_vertex_indices.z];
+		
+	mat4 model_matrix = instance_buffer[_vertex_indices.w].model_matrix;
+		
+	vec4 p0 = model_matrix * v0.position;	
+	vec4 p1 = model_matrix * v1.position;
+	vec4 p2 = model_matrix * v2.position;
+
+	vec3 normal = normalize(cross(p1.xyz-p0.xyz, p2.xyz-p1.xyz));
+
+	return normal;
+}
+
+vec3 rand(inout uint _seed)
+{
+	return vec3(randomFloat(_seed), randomFloat(_seed), randomFloat(_seed));
+	//return hash3(_seed);
+}
+
+Ray getHemiRay(uvec4 _vertex_indices, vec3 barycentricCoords, inout uint _seed)
+{			
+	vertex_s v0 = vertex_buffer[_vertex_indices.x];	
+	vertex_s v1 = vertex_buffer[_vertex_indices.y];	
+	vertex_s v2 = vertex_buffer[_vertex_indices.z];
+	
+	InstanceSSBO instance = instance_buffer[_vertex_indices.w];
+	
+	vec4 origin = vec4(v0.position * barycentricCoords.x + v1.position * barycentricCoords.y + v2.position * barycentricCoords.z);
+	origin = instance.model_matrix * origin;
+				
+	vec3 normal = getNormal(_vertex_indices, barycentricCoords);
+	
+	Ray ray;
+	ray.origin = offsetRayToAvoidSelfIntersection(origin.xyz, normal);
+	ray.direction = normal;
+	ray.t_min = 0.0;
+	ray.t_max = 10000.0f;	
+	
+	vec3 rnd_direction = sampleUnitSphereUniform(rand(_seed).xy);	
+	ray.direction = tangentSpaceToWorldSpace(rnd_direction, normal);
+	
+	return ray;
+}
+
+
+float map(float value, float min1, float max1, float min2, float max2) {
+  return min2 + (value - min1) * (max2 - min2) / (max1 - min1);
+}
+
+void main() 
+{
+	// calculate first ray
+	vec2 sccs = getScreenCoordinates();
+	Ray ray = getRay(sccs);
+
+	uint seed = initRandomSeed(gl_LaunchIDEXT.x, gl_LaunchIDEXT.y);
+
+	bool trace = true;
+	uint iter_count = 0;
+	while(trace)
+	{
+		iter_count += 1;
+		rp.instanceID = -1;
+		//traceRayEXT(topLevelAS, gl_RayFlagsNoneEXT, 0xff, 0, 0, 0, ray.origin.xyz, ray.t_min + aux_ubo.clipDistance, ray.direction.xyz, ray.t_max, 0);
+		traceRayEXT(topLevelAS, gl_RayFlagsNoneEXT, aux_ubo.cullMask, 0, 0, 0, ray.origin.xyz, ray.t_min, ray.direction.xyz, ray.t_max, 0);
+
+		// miss
+		if(rp.instanceID == -1) {
+			imageStore(output_image, ivec2(gl_LaunchIDEXT.xy), backgroundColor);
+			trace = false;
+		} else {
+			vec3 barycentricCoords = computeBarycentric(rp.hitAttribute);
+			InstanceSSBO instance_data = instance_buffer[rp.instanceID];
+			GeometrySSBO geometry_data = geometry_buffer[instance_data.geometry_buffer_offset + rp.geometryIndex];
+					
+			vec4 frag_color = vec4(1);
+		
+			uint idx_0 = 0;
+			uint idx_1 = 0;
+			uint idx_2 = 0;
+			if(geometry_data.has_indices){
+				idx_0 = index_buffer[geometry_data.index_buffer_offset + (rp.primitiveID * 3) + 0];
+				idx_1 = index_buffer[geometry_data.index_buffer_offset + (rp.primitiveID * 3) + 1];
+				idx_2 = index_buffer[geometry_data.index_buffer_offset + (rp.primitiveID * 3) + 2];
+			} else {
+				idx_0 = (rp.primitiveID * 3) + 0;
+				idx_1 = (rp.primitiveID * 3) + 1;
+				idx_2 = (rp.primitiveID * 3) + 2;
+			}
+		
+			if(aux_ubo.backfaceCulling)
+			{	
+				uvec4 vertex_indices = uvec4(geometry_data.vertex_buffer_offset + idx_0, geometry_data.vertex_buffer_offset +idx_1, geometry_data.vertex_buffer_offset +idx_2, rp.instanceID);
+				vec3 normal = getNormal(vertex_indices, barycentricCoords);
+			
+				if(dot(ray.direction.xyz, normal) > 0)
+				{
+					/*ray = getContinuingRay(barycentricCoords, vertex_indices, ray.direction.xyz, normal);
+
+					if(iter_count > 10)
+						break;
+
+					continue;*/
+					imageStore(output_image, ivec2(gl_LaunchIDEXT.xy), backgroundColor);
+					break;
+				}
+			}
+			
+			float wfac = aux_ubo.wireframeFactor;
+			if (!(barycentricCoords.x < wfac || barycentricCoords.y < wfac || barycentricCoords.z < wfac)) 
+			{
+				imageStore(output_image, ivec2(gl_LaunchIDEXT.xy), backgroundColor);
+				break;
+			}		
+
+			uvec4 vertex_indices = uvec4(geometry_data.vertex_buffer_offset + idx_0, geometry_data.vertex_buffer_offset +idx_1, geometry_data.vertex_buffer_offset +idx_2, rp.instanceID);
+						
+			int miss_count = 0;
+			for(int aoi=0; aoi<aux_ubo.aoSamples; aoi++)
+			{
+				Ray ao = getHemiRay( vertex_indices, barycentricCoords, seed);
+				traceRayEXT(topLevelAS, gl_RayFlagsNoneEXT, aux_ubo.cullMask, 0, 0, 0, ao.origin.xyz, ao.t_min, ao.direction.xyz, aux_ubo.aoDist, 0);
+				if(rp.instanceID == -1)
+					miss_count += 1;
+			}
+			float ao_fac = (1.0 - aux_ubo.aoBlending) + (aux_ubo.aoBlending * (0.5 + miss_count / float(aux_ubo.aoSamples)));
+			
+			vec3 normal = getNormal(vertex_indices, barycentricCoords);
+
+			uint vertex_count = aux_ubo.vertexCount;
+			uint from_vertex_ind = aux_ubo.sourceVertexInd;
+						
+			SCALAR f0, f1, f2;
+
+			if(aux_ubo.visualization == 0) {			
+				f0 = transport_buffer[linFrom2D(from_vertex_ind, geometry_data.vertex_buffer_offset + idx_0, vertex_count)];
+				f1 = transport_buffer[linFrom2D(from_vertex_ind, geometry_data.vertex_buffer_offset + idx_1, vertex_count)];
+				f2 = transport_buffer[linFrom2D(from_vertex_ind, geometry_data.vertex_buffer_offset + idx_2, vertex_count)];
+			} else if(aux_ubo.visualization == 1) {		
+				f0 = transport_buffer[linFrom2D(geometry_data.vertex_buffer_offset + idx_0, from_vertex_ind, vertex_count)];
+				f1 = transport_buffer[linFrom2D(geometry_data.vertex_buffer_offset + idx_1, from_vertex_ind, vertex_count)];
+				f2 = transport_buffer[linFrom2D(geometry_data.vertex_buffer_offset + idx_2, from_vertex_ind, vertex_count)];
+			} else {					
+				f0 = kelvin_buffer[geometry_data.vertex_buffer_offset + idx_0];
+				f1 = kelvin_buffer[geometry_data.vertex_buffer_offset + idx_1];
+				f2 = kelvin_buffer[geometry_data.vertex_buffer_offset + idx_2];
+			}
+
+			vec3 factor = vec3(f0, f1, f2);
+			float value = dot(factor, barycentricCoords);
+			value = map(value, aux_ubo.displayRangeMin, aux_ubo.displayRangeMax, 0.0, 1.0);
+			//value = (value / (value + 1.0)); // simple tonemapper
+			//frag_color = vec4(value, value, value, 1.0);
+			frag_color = sample_colormap_flo(value);
+
+			if(aux_ubo.visualization < 2) {
+				if( geometry_data.vertex_buffer_offset + idx_0 == from_vertex_ind || 
+					geometry_data.vertex_buffer_offset + idx_1 == from_vertex_ind || 
+					geometry_data.vertex_buffer_offset + idx_2 == from_vertex_ind ){ // one of the hit triangle corners must be the selected vertex (otherwise could be a different model/instance)
+					vec3 v_0 = (instance_data.model_matrix * vertex_buffer[geometry_data.vertex_buffer_offset + idx_0].position).xyz;
+					vec3 v_1 = (instance_data.model_matrix * vertex_buffer[geometry_data.vertex_buffer_offset + idx_1].position).xyz;
+					vec3 v_2 = (instance_data.model_matrix * vertex_buffer[geometry_data.vertex_buffer_offset + idx_2].position).xyz;
+					vec3 v = v_0 * barycentricCoords.x + v_1 * barycentricCoords.y + v_2 * barycentricCoords.z;
+					vec3 v_f = (instance_data.model_matrix * vertex_buffer[from_vertex_ind].position).xyz;
+
+					if( length(v-v_f) < vis_dot_size ) frag_color = vec4(0.1,1.0,0.1,1.0);
+				}
+
+				//if(from_vertex_ind == geometry_data.vertex_buffer_offset + idx_0)
+					//frag_color.x = max(frag_color.x, barycentricCoords.x);
+				//if(from_vertex_ind == geometry_data.vertex_buffer_offset + idx_1)
+					//frag_color.x = max(frag_color.x, barycentricCoords.y);
+				//if(from_vertex_ind == geometry_data.vertex_buffer_offset + idx_2)
+					//frag_color.x = max(frag_color.x, barycentricCoords.z);
+			}
+				
+			if(geometry_data.baseColorTexIdx != -1){
+
+				vec3 v_0 = (instance_data.model_matrix * vertex_buffer[geometry_data.vertex_buffer_offset + idx_0].position).xyz;
+				vec3 v_1 = (instance_data.model_matrix * vertex_buffer[geometry_data.vertex_buffer_offset + idx_1].position).xyz;
+				vec3 v_2 = (instance_data.model_matrix * vertex_buffer[geometry_data.vertex_buffer_offset + idx_2].position).xyz;
+				vec3 v = v_0 * barycentricCoords.x + v_1 * barycentricCoords.y + v_2 * barycentricCoords.z;
+
+				vec2 uv_0 = vertex_buffer[geometry_data.vertex_buffer_offset + idx_0].texture_coordinates_0.xy;
+				vec2 uv_1 = vertex_buffer[geometry_data.vertex_buffer_offset + idx_1].texture_coordinates_0.xy;
+				vec2 uv_2 = vertex_buffer[geometry_data.vertex_buffer_offset + idx_2].texture_coordinates_0.xy;
+				vec2 uv = uv_0 * barycentricCoords.x + uv_1 * barycentricCoords.y + uv_2 * barycentricCoords.z;
+
+				// level of detail calculation
+				Ray ray_x = getRay(sccs + vec2(2.0 / float(gl_LaunchSizeEXT.x), 0));
+				Ray ray_y = getRay(sccs - vec2(0, 2.0 / float(gl_LaunchSizeEXT.y)));
+				vec3 bary_x = computeBarycentric2(mat3(v_0, v_1, v_2), ray_x.origin, ray_x.direction);
+				vec3 bary_y = computeBarycentric2(mat3(v_0, v_1, v_2), ray_y.origin, ray_y.direction);
+
+				vec3 pos_ws_x = v_0 * bary_x.x + v_1 * bary_x.y + v_2 * bary_x.z;
+				vec3 pos_ws_y = v_0 * bary_y.x + v_1 * bary_y.y + v_2 * bary_y.z;
+
+				vec2 tex_coord_x = uv_0 * bary_x.x + uv_1 * bary_x.y + uv_2 * bary_x.z;
+				vec2 tex_coord_y = uv_0 * bary_y.x + uv_1 * bary_y.y + uv_2 * bary_y.z;
+				tex_coord_x -= uv;
+				tex_coord_y -= uv;
+				tex_coord_x *= 0.5;
+				tex_coord_y *= 0.5;
+			}			
+			
+			//float magn = length(frag_color.xyz);
+			//magn = (magn / (magn + 1.0));// + aux_ubo.clipDistance;
+			//frag_color = colormap(magn);
+
+			//frag_color = vec4(magn, magn, magn, 1.0);
+			//frag_color = vec4(color_map_inferno(pow(magn, 1.0/1.5)), 1.0);
+			//frag_color = vec4(color_map_inferno(magn), 1.0);
+			//frag_color = vec4(color_map_plasma(magn), 1.0);
+			//frag_color = colormap_(magn, 30, 31, 32); // rgbformulae(30, 31, 32)
+			imageStore(output_image, ivec2(gl_LaunchIDEXT.xy), vec4(frag_color.xyz * ao_fac, 1));
+			//imageStore(output_image, ivec2(gl_LaunchIDEXT.xy), vec4(ao_fac,ao_fac,ao_fac, 1));
+			trace = false;
+		}
+	}
+}
+

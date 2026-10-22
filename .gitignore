@@ -1,0 +1,25 @@
+# project
+_project/
+_bin/
+_*/
+assets/shader/cache/
+CMakeLists.txt.user
+*.cfg
+build/
+external_bin/radiance
+
+#intelij
+.idea/
+
+# vscode
+.vscode
+
+# macos
+.DS_Store
+
+#app
+cache/
+
+#matlab test data
+assets/scenes/*/*.m
+*.png

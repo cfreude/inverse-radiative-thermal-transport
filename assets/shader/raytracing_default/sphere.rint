@@ -1,0 +1,51 @@
+#version 460
+#extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_ray_tracing : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_scalar_block_layout : require
+#extension GL_EXT_debug_printf : enable
+
+#include "defines.h"
+layout(binding = GLSL_GLOBAL_INSTANCE_DATA_BINDING, set = GLSL_GLOBAL_DESC_SET) buffer instance_ssbo { Instance_s instance_buffer[]; };
+layout(binding = GLSL_GLOBAL_LIGHT_DATA_BINDING, set = GLSL_GLOBAL_DESC_SET) buffer light_ssbo { Light_s light_data[]; };
+
+hitAttributeEXT vec3 sphere_point;
+
+void main()
+{
+	const Instance_s instance_data = instance_buffer[gl_InstanceID];
+	const Light_s light_data = light_data[instance_data.light_buffer_offset];
+
+	vec3 orig = gl_WorldRayOriginEXT;
+	vec3 dir = gl_WorldRayDirectionEXT;
+
+	vec3 aabb_max = (instance_data.model_matrix * vec4(1.0,1.0,1.0,1.0)).xyz;
+	vec3 aabb_min = (instance_data.model_matrix * vec4(-1.0,-1.0,-1.0,1.0)).xyz;
+	vec3 center = (aabb_max + aabb_min) / vec3(2.0);
+	float radius = (aabb_max.x - aabb_min.x) / 2.0;
+	float radius2 = radius * radius;
+
+	 // geometric solution
+	vec3 L = center - orig; 
+	float tca = dot(L,dir); 
+	// if (tca < 0) return false;
+	float d2 = dot(L,L) - tca * tca; 
+	if (d2 <= radius2) {
+		float thc = sqrt(radius2 - d2); 
+		float t0 = tca - thc; 
+		float t1 = tca + thc; 
+
+		if (t0 > t1) {
+			float buff = t0;
+			t0 = t1;
+			t1 = buff;
+		}
+	
+		if (t0 < 0) { 
+			t0 = t1; // if t0 is negative, let's use t1 instead 
+		} 
+
+		if (t0 >= 0) reportIntersectionEXT(t0, 0);
+	}
+
+}

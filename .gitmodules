@@ -1,0 +1,51 @@
+[submodule "external/imgui"]
+	path = external/imgui
+	url = https://github.com/ocornut/imgui.git
+[submodule "external/ImGuizmo"]
+	path = external/ImGuizmo
+	url = https://github.com/CedricGuillemet/ImGuizmo
+[submodule "external/tinyobjloader"]
+	path = external/tinyobjloader
+	url = https://github.com/tinyobjloader/tinyobjloader.git
+[submodule "external/MikkTSpace"]
+	path = external/MikkTSpace
+	url = https://github.com/mmikk/MikkTSpace
+[submodule "external/tinyies"]
+	path = external/tinyies
+	url = https://github.com/fknfilewalker/tinyies.git
+[submodule "external/tinyldt"]
+	path = external/tinyldt
+	url = https://github.com/fknfilewalker/tinyldt.git
+[submodule "external/tinyexr"]
+	path = external/tinyexr
+	url = https://github.com/syoyo/tinyexr.git
+[submodule "external/tinyply"]
+	path = external/tinyply
+	url = https://github.com/ddiakopoulos/tinyply.git
+[submodule "external/tinygltf"]
+	path = external/tinygltf
+	url = https://github.com/syoyo/tinygltf.git
+[submodule "external/nlohmann_json"]
+	path = external/nlohmann_json
+	url = https://github.com/nlohmann/json.git
+[submodule "external/stb"]
+	path = external/stb
+	url = https://github.com/nothings/stb.git
+[submodule "external/glm"]
+	path = external/glm
+	url = https://github.com/g-truc/glm.git
+[submodule "external/imoguizmo"]
+	path = external/imoguizmo
+	url = https://github.com/fknfilewalker/imoguizmo
+[submodule "external/CLI11"]
+	path = external/CLI11
+	url = https://github.com/CLIUtils/CLI11.git
+[submodule "external/spdlog"]
+	path = external/spdlog
+	url = https://github.com/gabime/spdlog.git
+[submodule "external/eigen"]
+	path = external/eigen
+	url = https://gitlab.com/libeigen/eigen.git
+[submodule "external/glslang"]
+	path = external/glslang
+	url = https://github.com/KhronosGroup/glslang.git

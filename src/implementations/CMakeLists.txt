@@ -1,0 +1,12 @@
+FILE(GLOB impls RELATIVE ${CMAKE_CURRENT_SOURCE_DIR} "*")
+#message("glob impls " ${impls} "...")
+
+foreach(impl ${impls})
+  if(IS_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/${impl})
+    option(Build_${impl} "Build ${impl}" ON)
+	if( Build_${impl} )
+      add_subdirectory(${impl})
+      #message("adding impl " ${impl} "...")
+	endif()
+  endif()
+endforeach()
